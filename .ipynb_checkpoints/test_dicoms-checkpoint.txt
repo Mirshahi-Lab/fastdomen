@@ -1,6 +1,0 @@
-test_dicoms/test_series_1
-test_dicoms/test_series_2
-test_dicoms/test_series_3
-test_dicoms/test_series_4
-test_dicoms/test_series_5
-test_dicoms/test_series_6
