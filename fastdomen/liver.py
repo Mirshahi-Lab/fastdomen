@@ -113,7 +113,7 @@ def postprocess(preds, threshold=100):
     above_threshold = cp.where(liver_vals > threshold)[0]
     start, end = longest_consecutive_seg(above_threshold)
     preds[:start, ...] = 0
-    preds[end:, ...] - 0 
+    preds[end:, ...] = 0 
     return preds
 
 
