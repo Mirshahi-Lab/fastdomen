@@ -25,6 +25,7 @@ class DicomSeries:
         'AccessionNumber': 'accession',
         'SeriesDescription': 'cut',
         'ImageOrientationPatient': 'ct_direction',
+        'ImageType': 'image_type',
         'PatientSex': 'sex',
         'PatientBirthDate': 'birthday',
         'AcquisitionDate': 'scan_date',
@@ -39,7 +40,7 @@ class DicomSeries:
         'MultienergyCTAcquisitionSequence': 'multienergy_ct'
     }
 
-    def __init__(self, directory, filepattern='*.dcm'):
+    def __init__(self, directory, filepattern='*.dcm', make_frontal=True):
         """
         :param directory: the directory containing the series
         :param filepattern: the file pattern of the series
@@ -56,12 +57,14 @@ class DicomSeries:
         self.num_files = len(self.file_list)
         self.header = pydicom.dcmread(self.file_list[0])
         self.series_info = self._get_image_info(self.header)
+        self.series_info['directory'] = self.directory
         self.mrn = self.series_info['mrn']
         self.accession = self.series_info['accession']
         self.cut = self.series_info['cut']
         self.filename = f'MRN{self.mrn}_{self.accession}_{self.cut}'
-        self.spacing = [self.header.PixelSpacing[0], self.header.PixelSpacing[1], self.header.SliceThickness]
-        self.frontal = self.get_mip(axis=1)
+        self.spacing = [float(self.header.PixelSpacing[0]), float(self.header.PixelSpacing[1]), float(self.header.SliceThickness)]
+        if make_frontal:
+            self.frontal = self.get_mip(axis=1)
 
     # @staticmethod
     def read_dicom_series(self, window_center, window_width):
@@ -123,7 +126,8 @@ class DicomSeries:
                         if np.array_equal(orientation, direction):
                             value = key
                             break
-                    
+                elif tag == 'ImageType':
+                    value = '_'.join(value)
                 elif tag == 'PatientBirthDate':
                     value = datetime.strptime(value, '%Y%m%d').date()
                     value = value.strftime('%Y-%m-%d')

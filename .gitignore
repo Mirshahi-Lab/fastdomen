@@ -1,0 +1,7 @@
+id_files/
+test_dicoms_out/
+create_id_files.ipynb
+dip_auto_pulls.txt
+run_*
+**/__pycache__/
+*checkpoint*

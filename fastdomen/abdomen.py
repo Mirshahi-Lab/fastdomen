@@ -21,13 +21,13 @@ def measure_abdomen(ds, model, locations, model_weights, output_dir):
     preds = postprocess(batch_predict(model, torch_array))
     torch.cuda.empty_cache()
     cm_spacing = [x / 10 for x in ds.spacing]
-    subq_pixels, subq_area, visc_pixels, visc_area = sum_fat_pixels(body_array, preds, cm_spacing)
+    abd_areas, subq_pixels, subq_area, visc_pixels, visc_area = sum_fat_pixels(body_array, preds, cm_spacing)
     waist_circs, waist_areas = get_waist_data(waist_mask.get(), cm_spacing)
-    vert_data = measure_vert_slices(vert_info, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas)
+    vert_data = measure_vert_slices(vert_info, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas, abd_areas)
     abdomen_data.update(vert_data)
     for i in range(body_array.shape[0]):
         original_idx = start + i
-        abdomen_data[f'slice_{original_idx}'] = get_slice_vals(i, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas)
+        abdomen_data[f'slice_{original_idx}'] = get_slice_vals(i, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas, abd_areas)
         if i == vert_info['adj_L3']:
             plot_contours(body_array[i].get(), waist_mask[i].get(), output_dir)
     return abdomen_data
@@ -103,12 +103,13 @@ def sum_fat_pixels(body_array, preds, spacing):
     subq = body_array.copy()
     visc[preds == 0] = visc.min()
     subq[preds == 1] = subq.min()
+    abd_area = preds.sum(axis=(1, 2)) * spacing[0] * spacing[1]
     # [-190, -30] is the standard hounsfield window for fat
     visc_pixels = ((visc >= -190) & (visc <= -30)).sum(axis=(1, 2))
     subq_pixels = ((subq >= -190) & (subq <= -30)).sum(axis=(1, 2))
     visc_area = visc_pixels * spacing[0] * spacing[1]
     subq_area = subq_pixels * spacing[0] * spacing[1]
-    return subq_pixels, subq_area, visc_pixels, visc_area
+    return abd_area, subq_pixels, subq_area, visc_pixels, visc_area
     
 
 def get_waist_data(waist_mask, spacing):
@@ -126,18 +127,19 @@ def get_waist_data(waist_mask, spacing):
     return circs, areas
 
 
-def measure_vert_slices(vert_info, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas):
+def measure_vert_slices(vert_info, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas, abd_areas):
     vert_data = {}
     for vert in ['L1', 'L3', 'L5']:
         idx = vert_info[f'adj_{vert}']
-        vert_data[f'{vert}_measures'] = get_slice_vals(idx, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas)
+        vert_data[f'{vert}_measures'] = get_slice_vals(idx, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas, abd_areas)
     return vert_data
 
 
-def get_slice_vals(i, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas):
+def get_slice_vals(i, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas, abd_areas):
     slice_data = {}
     slice_data['body_circ'] = float(waist_circs[i])
     slice_data['body_area'] = round(float(waist_areas[i]), 2)
+    slice_data['abd_area'] = round(float(abd_areas[i]), 2)
     slice_data['subq_pixels'] = float(subq_pixels[i])
     slice_data['subq_area'] = round(float(subq_area[i]), 2)
     slice_data['visc_pixels'] = float(visc_pixels[i])

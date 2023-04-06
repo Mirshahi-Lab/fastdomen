@@ -25,28 +25,31 @@ warnings.filterwarnings('ignore', category=UserWarning)
 import torch
 from fastdomen.unext.archs import UNext
 from fastdomen.imaging.dicomseries import DicomSeries
+from fastdomen.recog import recog_ct
 from fastdomen.liver import measure_liver_hu, measure_spleen_hu
 from fastdomen.vertebra import detect_vertebra_slices
 from fastdomen.abdomen import measure_abdomen
+from fastdomen.kidney import measure_kidney
 
 
 def check_series(series, file_extension):
     try:
         ds = DicomSeries(series, file_extension)
+        usable = True
         cut = str(ds.cut).lower()
-        if ds.num_files < 50:
+        # if ds.num_files < 50:
+        #     usable = False
+        if ('bone' in cut) or ('head' in cut) or ('spine' in cut) or ('neck' in cut) or ('unknown' in cut):
             usable = False
-        elif ('bone' in cut) or ('head' in cut) or ('spine' in cut) or ('neck' in cut):
-            usable = False
-        elif (ds.series_info['ct_direction'] != 'AX') and (ds.series_info['ct_direction'] is not None):
-            usable = False
-        else:
-            usable = True
-        if not usable:
-            print(f'Dicom Series {series} is not usable for pipeline.\n')
+        # elif (ds.series_info['ct_direction'] != 'AX') and (ds.series_info['ct_direction'] is not None):
+        #     usable = False
+        # else:
+        #     usable = True
+        # if not usable:
+        #     print(f'Dicom Series {series} is not usable for pipeline.\n')
         return usable
     except Exception as e:
-        print(f'Error: {e}\n Dicom Series {series} is not usable for pipeline.\n')
+        print(f'Error: {e}\n Dicom Series {series} could not be read properly.\n')
         return False
 
 
@@ -80,48 +83,82 @@ def main():
         print(f'Series {idx+1}/{len(series_list)}')
         start_time = time.time()
         print(f'Analyzing {series}')
+
         usable = check_series(series, args.file_extension)
         if usable:
             quant_data = {}
-            ds = DicomSeries(series, args.file_extension)
-            
+            try:
+                ds = DicomSeries(series, args.file_extension)
+            except Exception as e:
+                print(f'{series} could not be read properly: {e}')
+                continue
             # Make output directory if it doesn't exist
             output_dir = f'{args.output_dir}/{ds.mrn}/{ds.accession}/{ds.cut}'
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
                 
             quant_data['header'] = ds.series_info
+            # Categorize the series by location
+            try:
+                print('Categorizing series...')
+                ct_type = recog_ct(ds)
+                print(f'CT classified: {ct_type}\n')
+                quant_data['header']['ct_type'] = ct_type
+            except Exception as e:
+                print(f'CT type recognition failed:\n \t{e}\n')
+                with open(args.failed_series, 'a') as f:
+                    f.write(f'{series}\n')
+                    continue
             # Segment and measure the liver
-            try:
-                print('Segmenting and measuring liver...')
-                liver_data = measure_liver_hu(ds, model, 'fastdomen/unext/models/liver.pth', output_dir)
-                quant_data['liver_data'] = liver_data
-                print('Done.\n')
-            except Exception as e:
-                print(f'Liver measurement failed:\n \t{e}\n')
-            # Segment and measure the spleen
-            try:
-                print('Segmenting and measuring spleen...')
-                spleen_data = measure_spleen_hu(ds, model, 'fastdomen/unext/models/spleen.pth', output_dir)
-                quant_data['spleen_data'] = spleen_data
-                print('Done.\n')
-            except Exception as e:
-                print(f'Spleen measurement failed:\n \t{e}\n')
+            if ct_type == 'other':
+                with open(args.failed_series, 'a') as f:
+                    f.write(f'{series}\n')
+                    continue
             
+            if ct_type == 'abdomen' or ct_type == 'chest':
+                try:
+                    print('Segmenting and measuring liver...')
+                    liver_data = measure_liver_hu(ds, model, 'fastdomen/unext/models/liver.pth', output_dir)
+                    quant_data['liver_data'] = liver_data
+                    print('Done.\n')
+                except Exception as e:
+                    print(f'Liver measurement failed:\n \t{e}\n')
+                # Segment and measure the spleen
+                try:
+                    print('Segmenting and measuring spleen...')
+                    spleen_data = measure_spleen_hu(ds, model, 'fastdomen/unext/models/spleen.pth', output_dir)
+                    quant_data['spleen_data'] = spleen_data
+                    print('Done.\n')
+                except Exception as e:
+                    print(f'Spleen measurement failed:\n \t{e}\n')
             
-            # Detect vertebra slice indices and quant the abdomen
-            try:
-                print('Detecting vertebra locations...')
-                locations = detect_vertebra_slices(ds, model, vert_weights, output_dir)
-                quant_data['vertebra_data'] = locations
-                print('Done\n')
-                # Quant the abdomen
-                print('Measuring abdominal fat...')
-                slice_data = measure_abdomen(ds, model, locations, 'fastdomen/unext/models/abdomen.pth', output_dir)
-                quant_data['abdomen_data'] = slice_data
-                print('Done\n')
-            except Exception as e:
-                print(f'Vertebra Detection/Abdomen quant failed:\n \t{e}\n')
+            if ct_type == 'abdomen':
+                # Detect vertebra slice indices and quant the abdomen
+                try:
+                    print('Detecting vertebra locations...')
+                    locations = detect_vertebra_slices(ds, model, vert_weights, output_dir)
+                    quant_data['vertebra_data'] = locations
+                    print('Done\n')
+                    # Quant the abdomen
+                    print('Measuring abdominal fat...')
+                    slice_data = measure_abdomen(ds, model, locations, 'fastdomen/unext/models/abdomen.pth', output_dir)
+                    quant_data['abdomen_data'] = slice_data
+                    print('Done\n')
+                except Exception as e:
+                    print(f'Vertebra Detection/Abdomen quant failed:\n \t{e}\n')
+                try:
+                    print('Measuring kidney volumes...')
+                    kidney_data = measure_kidney(ds, model, 'fastdomen/unext/models/kidney.pth', output_dir)
+                    quant_data['kidney_data'] = kidney_data
+                    print('Done\n')
+                except Exception as e:
+                    print(f'Kidney Volume Measurement failed:\n \t{e}\n')
+                    quant_data['kidney_data'] = {}
+            elif ct_type == 'chest':
+                quant_data['abdomen_data'] = {}
+                quant_data['vertebra_data'] = {}
+                quant_data['kidney_data'] = {}
+            
             runtime = time.time() - start_time
             quant_data['runtime'] = f'{runtime:.2f}'
             print(f'Fastdomen runtime: {runtime:.2f} seconds')
