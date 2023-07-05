@@ -15,10 +15,11 @@ parser = argparse.ArgumentParser(description='Fastdomen - Fast and Automatic Qua
 parser.add_argument('--input', '-i', type=str, help='The input file to be analyzed (can be a directory of Dicom files or a Nifti File)')
 parser.add_argument('--output-dir', '-o', type=str, help='The directory to store the output into (please use absolute paths)')
 parser.add_argument('--gpu', '-g', type=str, default='0', help='The gpu device ID to use, default = "0"')
-parser.add_argument('--fast-mode', '-f', action='store_true', help='Use the fast mode of Total Segmentator') 
+parser.add_argument('--fast-mode', action='store_true', help='Use the fast mode of Total Segmentator') 
 parser.add_argument('--tmp-dir', type=str, default=None, help='Writable directory for temporary files. Only change if default tmp directory on system is not writable.')
 
 args = parser.parse_args()
+print(f'{args=}')
 if args.gpu is not None:
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 else:
@@ -29,10 +30,10 @@ if args.tmp_dir is not None:
 warnings.filterwarnings('ignore', category=UserWarning)
 
 import torch
-from totalsegmentator.python_api import totalsegmentator
 from fastdomen.imaging.convert_dicom_to_nifti import convert_dicom
+from fastdomen.segmentor import segment_organs
 
-def main():
+def main(args):
     """
     Main function to run the pipeline
     """
@@ -47,7 +48,6 @@ def main():
         args.input = glob(f'{args.output_dir}/*nii.gz')[0]
         header = f'{args.output_dir}/header.json'
     else:
-        # 
         input_dir = '/'.join(args.input.split('/')[:-1])
         mrn_acc_cut = '/'.join(args.input.split('/')[-4:-1])
         args.output_dir = f'{args.output_dir}/{mrn_acc_cut}'
@@ -76,10 +76,6 @@ def main():
         'skeletal_muscle'
     ]
     
+    orgs, fats = segment_organs(args.input, args.output_dir, full_organs, subitems, args.fast_mode)
     
-    
-    
-    
-    
-if __name__ == '__main__':
-    main()
+main(args)
