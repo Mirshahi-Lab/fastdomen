@@ -3,33 +3,40 @@ from cupyx.scipy import ndimage
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-from skimage import filters, morphology
+from cucim.skimage import filters, morphology
 from skimage.measure import label, find_contours, regionprops
 
 from fastdomen.imaging.utils import normalize_zero_one, normalize_pytorch
 # from fastdomen.unext.utils import batch_predict
 
 
-def measure_verts(tissue_seg, tissue_dict, vert_dict, header):
+def measure_verts(original, tissue_seg, tissue_dict, vert_dict, spacing):
     """
-    A function to measure the subq/visceral fat and skeletal muscle at each vertebrae
+    A function to measure the body circ/area, subq/visceral fat and skeletal muscle at each vertebrae
     """
     out_dict = {}
-    l, w = header['length_mm'], header['width_mm']
+    l, w, _ = spacing
     for vert in ['vertebrae_L1', 'vertebrae_L3', 'vertebrae_L5']:
         loc = vert_dict[vert]
         # print(f'{loc=}')
         if loc is not None:
+            body_slice = remove_table(original[:, :, loc])
+            waist_circ, waist_area = get_waist_data(body_slice, l, w)
             fat_slice = tissue_seg[:, :, loc]
             tissue_out = {}
             tissue_out['slice_idx'] = loc
+            tissue_out['body_circ'] = float(round(waist_circ, 2))
+            tissue_out['body_area'] = float(round(waist_area, 2))
             for tissue, idx in tissue_dict.items():
                 # print(f'{tissue=}, {idx=}')
                 tissue_msk = cp.where(fat_slice == idx, 1, 0)
                 tissue_out[f'{tissue}_area'] = float(cp.round(tissue_msk.sum() * l * w, 2))
+            
         else:
             tissue_out = {}
             tissue_out['slice_idx'] = loc
+            tissue_out['body_circ'] = None
+            tissue_out['body_area'] = None
             for tissue, idx in tissue_dict.items():
                 tissue_out[f'{tissue}_area'] = None
         
@@ -37,12 +44,12 @@ def measure_verts(tissue_seg, tissue_dict, vert_dict, header):
     return out_dict
 
 
-def total_torso_measure(tissue_seg, tissue_dict, vert_dict, header):
+def total_torso_measure(tissue_seg, tissue_dict, vert_dict, spacing):
     """
     Measure the total torso area from the L1 to L5 (or L3) vertebra as well as the total volume
     """
     # Get the l, w, and h for each voxel in mm
-    l, w, h = header['length_mm'], header['width_mm'], header['slice_thickness_mm']
+    l, w, h = spacing
     # vert_dict.pop('vertebrae_T12')
     vert_dict = {k: v for k, v in vert_dict.items() if v is not None and k != 'vertebrae_T12'}
     # print(f'torso {vert_dict=}')
@@ -111,17 +118,18 @@ def total_torso_measure(tissue_seg, tissue_dict, vert_dict, header):
 #     return body_array, body_norm, waist_mask
     
     
-# def remove_table(body_slice):
-#     tgray = body_slice > filters.threshold_otsu(body_slice.copy().get())
-#     keep_mask = morphology.remove_small_objects(tgray.get(), min_size=463)
-#     keep_mask = cp.asarray(morphology.remove_small_holes(keep_mask), dtype=cp.int)
-#     labels, _ = ndimage.label(keep_mask)
-#     unique, counts = cp.unique(labels, return_counts=True)
-#     unique, counts = unique[1:], counts[1:]
-#     largest_label = int(unique[int(cp.argmax(counts))])
-#     keep_mask[labels != largest_label] = 0
-#     keep_mask = ndimage.binary_fill_holes(keep_mask)
-#     return keep_mask
+def remove_table(body_slice):
+    # tgray = body_slice > filters.threshold_otsu(body_slice.copy().get())
+    tgray = body_slice > filters.threshold_otsu(body_slice)
+    keep_mask = morphology.remove_small_objects(tgray, min_size=463)
+    keep_mask = morphology.remove_small_holes(keep_mask)
+    labels, _ = ndimage.label(keep_mask)
+    unique, counts = cp.unique(labels, return_counts=True)
+    unique, counts = unique[1:], counts[1:]
+    largest_label = int(unique[int(cp.argmax(counts))])
+    keep_mask[labels != largest_label] = 0
+    keep_mask = cp.asarray(ndimage.binary_fill_holes(keep_mask))
+    return keep_mask
 
 
 # def find_start_and_end(locations):
@@ -174,19 +182,20 @@ def total_torso_measure(tissue_seg, tissue_dict, vert_dict, header):
 #     return abd_area, subq_pixels, subq_area, visc_pixels, visc_area
     
 
-# def get_waist_data(waist_mask, spacing):
-#     h, w, _ = spacing
-#     circs = []
-#     areas = []
-#     for i in range(waist_mask.shape[0]):
-#         labels = label(waist_mask[i])
-#         regions = regionprops(labels)
-#         waist = max(regions, key=lambda x: x.area)
-#         waist_circ = round(waist.perimeter * w, 2)
-#         waist_area = round(waist.area * w * h, 2)
-#         circs.append(waist_circ)
-#         areas.append(waist_area)
-#     return circs, areas
+def get_waist_data(waist_mask, h, w):
+    # h, w = spacing
+    # circs = []
+    # areas = []
+    # for i in range(waist_mask.shape[0]):
+    labels = label(waist_mask.get())
+    regions = regionprops(labels)
+    waist = max(regions, key=lambda x: x.area)
+    # waist circ is in cm
+    waist_circ = round(waist.perimeter * w / 10, 2)
+    waist_area = round(waist.area * w * h, 2)
+    # circs.append(waist_circ)
+    # areas.append(waist_area)
+    return waist_circ, waist_area
 
 
 # def measure_vert_slices(vert_info, subq_pixels, subq_area, visc_pixels, visc_area, waist_circs, waist_areas, abd_areas):
