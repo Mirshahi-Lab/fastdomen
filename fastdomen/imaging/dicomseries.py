@@ -23,7 +23,7 @@ class DicomSeries:
     important_attributes = {
         'PatientID': 'mrn',
         'AccessionNumber': 'accession',
-        'SeriesDescription': 'cut',
+        'SeriesDescription': 'series_name',
         'ImageOrientationPatient': 'ct_direction',
         'ImageType': 'image_type',
         'PatientSex': 'sex',
@@ -60,8 +60,8 @@ class DicomSeries:
         self.series_info['directory'] = self.directory
         self.mrn = self.series_info['mrn']
         self.accession = self.series_info['accession']
-        self.cut = self.series_info['cut']
-        self.filename = f'MRN{self.mrn}_{self.accession}_{self.cut}'
+        self.series_name = self.series_info['series_name']
+        self.filename = f'MRN{self.mrn}_{self.accession}_{self.series_name}'
         self.spacing = [float(self.header.PixelSpacing[0]), float(self.header.PixelSpacing[1]), float(self.header.SliceThickness)]
         if make_frontal:
             self.frontal = self.get_mip(axis=1)

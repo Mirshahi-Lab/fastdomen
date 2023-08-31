@@ -1,179 +1,136 @@
 import argparse
-import cupy as cp
 import json
-import matplotlib.pyplot as plt
-import numpy as np
 import os
 import time
 import warnings
+import cupy as cp
+import numpy as np
+import nibabel as nib
+import matplotlib.pyplot as plt
+import pandas as pd
 
-parser = argparse.ArgumentParser(description='Fastdomen - Fast and Automatic Quantifcation of Abdominal CT Scans')
-parser.add_argument('--series-list', '-i', type=str, help='The list of ct series to quantify (please use absolute path names)')
-parser.add_argument('--output-dir', '-o', type=str, help='The directory to store the output into (please use absolute path names)')
-parser.add_argument('--file-extension', '-e', type=str, help='The file extension of the dicom files, default = "*", matching every file', default='*')
-parser.add_argument('--gpu', '-g', default='0', type=str, help='Specified gpu device to use, default = 0')
-parser.add_argument('--failed-series', type=str, default=None, help='File to save the names of series that failed quants')
-parser.add_argument('--completed-series', type=str, default=None, help='File to save the names of completed series')
+from glob import glob
+
+parser = argparse.ArgumentParser(description='Fastdomen - Fast and Automatic Quantification of CT Scans using TotalSegmentator')
+parser.add_argument('--gpu', '-g', type=str, default='0', help='The gpu device ID to use, default = "0"')
+parser.add_argument('--input', '-i', type=str, help='The input file to be analyzed (can be a directory of Dicom files or a Nifti File)')
+parser.add_argument('--output-dir', '-o', type=str, help='The directory to store the output into (please use absolute paths)')
+
+parser.add_argument('--fast-mode', action='store_true', help='Use the fast mode of Total Segmentator') 
+parser.add_argument('--tmp-dir', type=str, default=None, help='Writable directory for temporary files. Only change if default tmp directory on system is not writable.')
+
 args = parser.parse_args()
 
 if args.gpu is not None:
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 else:
-    raise RuntimeError('Please specify a gpu device to use with the --gpu argument.')
-warnings.filterwarnings('ignore', category=UserWarning)
-# These need to be imported after the argument parsing so gpu selection works properly
+    raise RuntimeError('Please specify a gpu device to use with the --gpu argument')
+if args.tmp_dir is not None:
+    os.environ['TMPDIR'] = args.tmp_dir
+
 import torch
-from fastdomen.unext.archs import UNext
-from fastdomen.imaging.dicomseries import DicomSeries
-from fastdomen.recog import recog_ct
-from fastdomen.liver import measure_liver_hu, measure_spleen_hu
-from fastdomen.vertebra import detect_vertebra_slices
-from fastdomen.abdomen import measure_abdomen
-from fastdomen.kidney import measure_kidney
-
-
-def check_series(series, file_extension):
-    try:
-        ds = DicomSeries(series, file_extension)
-        usable = True
-        cut = str(ds.cut).lower()
-        # if ds.num_files < 50:
-        #     usable = False
-        if ('bone' in cut) or ('head' in cut) or ('spine' in cut) or ('neck' in cut) or ('unknown' in cut):
-            usable = False
-        # elif (ds.series_info['ct_direction'] != 'AX') and (ds.series_info['ct_direction'] is not None):
-        #     usable = False
-        # else:
-        #     usable = True
-        # if not usable:
-        #     print(f'Dicom Series {series} is not usable for pipeline.\n')
-        return usable
-    except Exception as e:
-        print(f'Error: {e}\n Dicom Series {series} could not be read properly.\n')
-        return False
-
+from fastdomen.abdomen import measure_verts, total_torso_measure
+from fastdomen.aorta import measure_aorta
+from fastdomen.imaging.convert_dicom_to_nifti import convert_dicom
+# from fastdomen.kidney import measure_estimated_volume
+from fastdomen.segmentor import segment_organs, get_organ_indicies
+from fastdomen.vertebra import find_vertebrae_centers, plot_vertebrae_overlay
 
 def main():
     """
-    Main function to run the analysis
+    Main function to run the pipeline
     """
-    # print(args)
-    torch.set_num_threads(4)
     plt.ioff()
     if not torch.cuda.is_available():
         raise OSError('CUDA Device is not detected. Check your installation of pytorch for compatiblity.')
+    # If a dicom series is given, convert it to a nifti file with the header preserved in header.json
+    # Else, make sure that the output directory is defined properly
+    if os.path.isdir(args.input):
+        print('Converting Dicom folder to Nifti format...')
+        args.output_dir = convert_dicom(args)
+        args.input = glob(f'{args.output_dir}/*nii.gz')
+        header = f'{args.output_dir}/header_info.json'
+    else:
+        input_dir = '/'.join(args.input.split('/')[:-1])
+        mrn_acc_cut = '/'.join(args.input.split('/')[-4:-1])
+        args.output_dir = f'{args.output_dir}/{mrn_acc_cut}'
+        header = f'{input_dir}/header_info.json'
+        args.input = [args.input]
         
-    with open(args.series_list, 'r') as f:
-        series_list = [x.strip('\n') for x in f.readlines()]
+    if os.path.exists(f'{args.output_dir}/totseg_v1_completed.txt'):
+        with open(f'{args.output_dir}/totseg_v1_completed.txt', 'r') as f:
+            completed = f.read().splitlines()
+    else:
+        completed = []
+            
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
     
-    if args.failed_series is None:
-        args.failed_series = os.path.splitext(args.series_list)[0] + '_failed.txt'
-    if args.completed_series is None:
-        args.completed_series = os.path.splitext(args.series_list)[0] + '_completed.txt'
-    # print(series_list)
-    model = UNext(1, 1, img_size=512, in_chans=1).cuda()
-    model.eval()
     
-    vert_weights = {
-        'L1': 'fastdomen/unext/models/vertebra/L1_model.pth',
-        'L3': 'fastdomen/unext/models/vertebra/L3_model.pth',
-        'L5': 'fastdomen/unext/models/vertebra/L5_model.pth',
-    }
-    for idx, series in enumerate(series_list):
-        print(f'Series {idx+1}/{len(series_list)}')
-        start_time = time.time()
-        print(f'Analyzing {series}')
+    # Define the objects to save
+    full_organs = [
+        'liver',
+        'spleen',
+        'kidney_left',
+        'kidney_right',
+        'stomach',
+        'aorta',
+        'vertebrae_L1',
+        'vertebrae_L3',
+        'vertebrae_L5',
+        'vertebrae_T12'
+    ]
+    subitems = [
+        'subcutaneous_fat',
+        'torso_fat',
+        'skeletal_muscle'
+    ]
 
-        usable = check_series(series, args.file_extension)
-        if usable:
-            quant_data = {}
-            try:
-                ds = DicomSeries(series, args.file_extension)
-            except Exception as e:
-                print(f'{series} could not be read properly: {e}')
-                continue
-            # Make output directory if it doesn't exist
-            output_dir = f'{args.output_dir}/{ds.mrn}/{ds.accession}/{ds.cut}'
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-                
-            quant_data['header'] = ds.series_info
-            # Categorize the series by location
-            try:
-                print('Categorizing series...')
-                ct_type = recog_ct(ds)
-                print(f'CT classified: {ct_type}\n')
-                quant_data['header']['ct_type'] = ct_type
-            except Exception as e:
-                print(f'CT type recognition failed:\n \t{e}\n')
-                with open(args.failed_series, 'a') as f:
-                    f.write(f'{series}\n')
-                    continue
-            # Segment and measure the liver
-            if ct_type == 'other':
-                with open(args.failed_series, 'a') as f:
-                    f.write(f'{series}\n')
-                    continue
-            
-            if ct_type == 'abdomen' or ct_type == 'chest':
-                try:
-                    print('Segmenting and measuring liver...')
-                    liver_data = measure_liver_hu(ds, model, 'fastdomen/unext/models/liver.pth', output_dir)
-                    quant_data['liver_data'] = liver_data
-                    print('Done.\n')
-                except Exception as e:
-                    print(f'Liver measurement failed:\n \t{e}\n')
-                # Segment and measure the spleen
-                try:
-                    print('Segmenting and measuring spleen...')
-                    spleen_data = measure_spleen_hu(ds, model, 'fastdomen/unext/models/spleen.pth', output_dir)
-                    quant_data['spleen_data'] = spleen_data
-                    print('Done.\n')
-                except Exception as e:
-                    print(f'Spleen measurement failed:\n \t{e}\n')
-            
-            if ct_type == 'abdomen':
-                # Detect vertebra slice indices and quant the abdomen
-                try:
-                    print('Detecting vertebra locations...')
-                    locations = detect_vertebra_slices(ds, model, vert_weights, output_dir)
-                    quant_data['vertebra_data'] = locations
-                    print('Done\n')
-                    # Quant the abdomen
-                    print('Measuring abdominal fat...')
-                    slice_data = measure_abdomen(ds, model, locations, 'fastdomen/unext/models/abdomen.pth', output_dir)
-                    quant_data['abdomen_data'] = slice_data
-                    print('Done\n')
-                except Exception as e:
-                    print(f'Vertebra Detection/Abdomen quant failed:\n \t{e}\n')
-                try:
-                    print('Measuring kidney volumes...')
-                    kidney_data = measure_kidney(ds, model, 'fastdomen/unext/models/kidney.pth', output_dir)
-                    quant_data['kidney_data'] = kidney_data
-                    print('Done\n')
-                except Exception as e:
-                    print(f'Kidney Volume Measurement failed:\n \t{e}\n')
-                    quant_data['kidney_data'] = {}
-            elif ct_type == 'chest':
-                quant_data['abdomen_data'] = {}
-                quant_data['vertebra_data'] = {}
-                quant_data['kidney_data'] = {}
-            
-            runtime = time.time() - start_time
-            quant_data['runtime'] = f'{runtime:.2f}'
-            print(f'Fastdomen runtime: {runtime:.2f} seconds')
-            print(f'Saving measurements to {output_dir}/{ds.filename}_quant.json')
-            json.dump(quant_data, open(f'{output_dir}/{ds.filename}_quant.json', 'w'))
-            # plt.close()
-            torch.cuda.empty_cache()
-            cp._default_memory_pool.free_all_blocks()
-            print(f'----Done----\n')
-            with open(args.completed_series, 'a') as f:
-                f.write(f'{series}\n')
-        else:
-            print(f'Series {series} is not the proper type of CT for measurement.\n')
-            with open(args.failed_series, 'a') as f:
-                f.write(f'{series}\n')
+    # Need to loop through this if the dicom files convert into multiple niftis
+    for input_ in args.input:
+        if input_ in completed:
+            print(f"{input_} has already been segmented with this version of Fastdomen.")
+            continue
+        print(f'input={input_}, output_dir={args.output_dir}')
+        orgs, fats, seg_dir = segment_organs(input_, args.output_dir, full_organs, subitems, args.fast_mode)
         
+        original = cp.asarray(nib.load(input_).get_fdata())
+        # Push the segs to gpu for fast calcs
+        orgs = cp.asarray(orgs.get_fdata())
+        fats = cp.asarray(fats.get_fdata())
+        # Get the maps for indices as the masks are multi-indexed
+        organ_map, tissue_map = get_organ_indicies(full_organs, subitems)
+        # Load the stats for each segmented organ
+        with open(f'{seg_dir}/statistics.json', 'r') as f:
+            stats = json.load(f)
+        # Load the header data 
+        with open(header, 'r') as f:
+            header_dict = json.load(f)
+        header_dict['image_shape'] = original.shape
+        spacing = [header_dict['length_mm'], header_dict['width_mm'], header_dict['slice_thickness_mm']]
+        if header_dict['ct_direction'] == 'COR':
+            spacing = [spacing[0], spacing[-1], spacing[1]]
+        elif header_dict['ct_direction'] == 'SAG':
+            spacing = [spacing[-1], spacing[0], spacing[1]]
+        # Get vertebrae information
+        vertebrae_locs = find_vertebrae_centers(orgs, organ_map, stats)
+        # print(vertebrae_locs)
+        plot_vertebrae_overlay(input_, vertebrae_locs, seg_dir)
+        vert_vals = measure_verts(original, fats, tissue_map, vertebrae_locs, spacing)
+        torso_vals = total_torso_measure(fats, tissue_map, vertebrae_locs, spacing)
+        # Measure aortic calcification
+        aorta_calc = measure_aorta(original, orgs, organ_map, vertebrae_locs, spacing)
+        header_dict.update(vert_vals)
+        header_dict['tissue_stats'] = torso_vals
+        
+        organ_dict = {organ: stats[organ] for organ in full_organs[:6]}
+        header_dict.update(organ_dict)
+        header_dict['aorta_stats'] = aorta_calc
+        with open(f'{seg_dir}/fastdomen_out.json', 'w') as f:
+            json.dump(header_dict, f)
+        with open(f'{args.output_dir}/totseg_v1_completed.txt', 'a') as f:
+            f.write(f'{input_}\n')
+        torch.cuda.empty_cache()
+    print('Done!')
 if __name__ == '__main__':
     main()

@@ -7,65 +7,65 @@ import torch
 import SimpleITK as sitk
 
 from fastdomen.imaging.dicomseries import DicomSeries
-from fastdomen.unext.utils import batch_predict
+# from fastdomen.unext.utils import batch_predict
 from fastdomen.imaging.utils import normalize_pytorch, normalize_zero_one
-from fastdomen.liver import longest_consecutive_seg
+# from fastdomen.liver import longest_consecutive_seg
+
+#### PRE - TOTAL SEGMENTATOR CODE #####
+# def measure_kidney(ds: DicomSeries, model, model_weights, output_dir):
+#     kidney_data = {}
+#     images = ds.read_dicom_series(50, 400)
+#     torch_images = preprocess(images)
+#     model.load_state_dict(torch.load(model_weights))
+#     preds = batch_predict(model, torch_images)
+#     left_k, right_k = postprocess(preds, threshold=50)
+#     preds = cp.concatenate((left_k, right_k), axis=2)
+#     voxel_volumes = measure_direct_volume(left_k, right_k, ds.spacing)
+#     kidney_data.update(voxel_volumes)
+#     estimated_volume = measure_estimated_volume(left_k, right_k, ds.spacing)
+#     kidney_data.update(estimated_volume)
+#     return kidney_data
 
 
-def measure_kidney(ds: DicomSeries, model, model_weights, output_dir):
-    kidney_data = {}
-    images = ds.read_dicom_series(50, 400)
-    torch_images = preprocess(images)
-    model.load_state_dict(torch.load(model_weights))
-    preds = batch_predict(model, torch_images)
-    left_k, right_k = postprocess(preds, threshold=50)
-    preds = cp.concatenate((left_k, right_k), axis=2)
-    voxel_volumes = measure_direct_volume(left_k, right_k, ds.spacing)
-    kidney_data.update(voxel_volumes)
-    estimated_volume = measure_estimated_volume(left_k, right_k, ds.spacing)
-    kidney_data.update(estimated_volume)
-    return kidney_data
+# def preprocess(images):
+#     images = 255 * normalize_zero_one(images)
+#     images = normalize_pytorch(images, images.max(), 0.445, 0.269)
+#     images = torch.as_tensor(images, dtype=torch.float32, device='cuda')
+#     images = images.unsqueeze(1)
+#     return images
 
 
-def preprocess(images):
-    images = 255 * normalize_zero_one(images)
-    images = normalize_pytorch(images, images.max(), 0.445, 0.269)
-    images = torch.as_tensor(images, dtype=torch.float32, device='cuda')
-    images = images.unsqueeze(1)
-    return images
+# def postprocess(preds, threshold=100):
+#     """
+#     postprocess the predictions for further analysis
+#     """
+#     preds = torch.round(torch.squeeze(preds))
+#     preds = cp.asarray(preds)
+#     left_k = preds[:, :, :256]
+#     right_k = preds[:, :, 256:]
+#     try:
+#         left_k = process_kidney(left_k, threshold)
+#     except ValueError:
+#         print('Left Kidney was not found in segmentation')
+#     try:
+#         right_k = process_kidney(right_k, threshold)
+#     except ValueError:
+#         print('Right Kidney was not found in segmentation')
+#     return left_k, right_k
 
 
-def postprocess(preds, threshold=100):
-    """
-    postprocess the predictions for further analysis
-    """
-    preds = torch.round(torch.squeeze(preds))
-    preds = cp.asarray(preds)
-    left_k = preds[:, :, :256]
-    right_k = preds[:, :, 256:]
-    try:
-        left_k = process_kidney(left_k, threshold)
-    except ValueError:
-        print('Left Kidney was not found in segmentation')
-    try:
-        right_k = process_kidney(right_k, threshold)
-    except ValueError:
-        print('Right Kidney was not found in segmentation')
-    return left_k, right_k
-
-
-def process_kidney(kidney_mask, threshold):
-    # First, only keep the largest connected segments
-    new_mask = cp.zeros_like(kidney_mask)
-    for i in range(kidney_mask.shape[0]):
-        if kidney_mask[i].sum() > 0:
-            new_mask[i] = largest_connected_seg(kidney_mask[i])
-    kidney_vals = new_mask.sum(axis=(1,2))
-    above_thresh = cp.where(kidney_vals > threshold)[0]
-    start, end = longest_consecutive_seg(above_thresh)
-    new_mask[:start, ...] = 0
-    new_mask[end:, ...] = 0
-    return new_mask
+# def process_kidney(kidney_mask, threshold):
+#     # First, only keep the largest connected segments
+#     new_mask = cp.zeros_like(kidney_mask)
+#     for i in range(kidney_mask.shape[0]):
+#         if kidney_mask[i].sum() > 0:
+#             new_mask[i] = largest_connected_seg(kidney_mask[i])
+#     kidney_vals = new_mask.sum(axis=(1,2))
+#     above_thresh = cp.where(kidney_vals > threshold)[0]
+#     start, end = longest_consecutive_seg(above_thresh)
+#     new_mask[:start, ...] = 0
+#     new_mask[end:, ...] = 0
+#     return new_mask
 
 
 def largest_connected_seg(keep_mask):
@@ -138,8 +138,8 @@ def find_max_diameter(mask, spacing):
     maj_max = 0
     min_max = 0
     index = 0
-    for i in range(mask.shape[0]):
-        im = mask[i]
+    for i in range(mask.shape[1]):
+        im = mask[:, :, i]
         if im.sum() > 0:
             tmp_max, tmp_min = max_transverse_axes(im, spacing)
             if tmp_max > maj_max:
@@ -152,12 +152,12 @@ def find_max_diameter(mask, spacing):
 def estimate_length(mask, spacing):
     # Get all slices where the mask exists
     l, w, h = spacing
-    z_locs = cp.where(mask)[0]
+    z_locs = cp.where(mask)[-1]
     min_z = z_locs.min()
     max_z = z_locs.max()
     # Extract top and bottom slices
-    min_slice = mask[min_z]
-    max_slice = mask[max_z]
+    min_slice = mask[:, :, min_z]
+    max_slice = mask[:, :, max_z]
     # Convert indices into mm for euclidean space
     min_z = min_z * h
     max_z = max_z * h
@@ -179,9 +179,11 @@ def spheroid_kv(axial_pcs, length):
     return ((np.pi / 6) * (width * depth * length) / 1000).round(1)
 
 
-def measure_estimated_volume(left_k, right_k, spacing):
+def measure_estimated_volume(organ_seg, organ_map, spacing):
     volumes = {}
     l, w, h = spacing
+    right_k = cp.where(organ_seg == organ_map['kidney_right'], 1, 0)
+    left_k = cp.where(organ_seg == organ_map['kidney_left'], 1, 0)
     r_ax_axes = find_max_diameter(right_k, [w, l])
     r_avg_length = estimate_length(right_k, spacing)
     l_ax_axes = find_max_diameter(left_k, [w, l])
@@ -189,7 +191,7 @@ def measure_estimated_volume(left_k, right_k, spacing):
     rkv = spheroid_kv(r_ax_axes, r_avg_length)
     lkv = spheroid_kv(l_ax_axes, l_avg_length)
     tkv = rkv + lkv
-    volumes['left_spheroid_volume'] = round(float(lkv))
-    volumes['right_spheroid_volume'] = round(float(rkv))
-    volumes['total_spheroid_volume'] = round(float(tkv))
+    volumes['left_spheroid_volume'] = round(float(lkv), 2)
+    volumes['right_spheroid_volume'] = round(float(rkv), 2)
+    volumes['total_spheroid_volume'] = round(float(tkv), 2)
     return volumes
